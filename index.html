@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>JAL — Sale Order to CSV</title>
+<style>
+  :root{
+    --ink:#16241f;          /* deep pine — primary text */
+    --ink-soft:#5c6b63;
+    --paper:#faf8f3;        /* lighter ledger paper */
+    --panel:#ffffff;
+    --line:#e7e2d6;         /* softer hairline */
+    --line-soft:#f0ece2;
+    --brass:#b07a2c;        /* accent: aged brass */
+    --brass-deep:#8a5d1c;
+    --leaf:#2f6d4f;         /* success / go */
+    --leaf-soft:#eaf3ee;
+    --alarm:#a4361f;
+    --alarm-soft:#f9ede9;
+    --shadow:0 1px 2px rgba(30,40,30,.04), 0 4px 16px rgba(30,40,30,.05);
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--paper);
+    color:var(--ink);
+    font-family:var(--sans);
+    font-size:16px;
+    line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+  }
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Fraunces:opsz,wght@9..144,500;9..144,600&display=swap');
+
+  .wrap{max-width:1000px;margin:0 auto;padding:0 28px}
+
+  /* ---------- masthead ---------- */
+  header.masthead{
+    border-bottom:1px solid var(--line);
+    padding:34px 0 24px;
+    margin-bottom:34px;
+  }
+  .masthead .wrap{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;flex-wrap:wrap}
+  .brand{display:flex;flex-direction:column;gap:2px}
+  .brand h1{
+    font-family:"Fraunces",Georgia,serif;
+    font-weight:500;
+    font-size:34px;
+    letter-spacing:-.015em;
+    margin:0;
+    line-height:1.05;
+    color:var(--ink);
+  }
+  .brand .sub{font-size:13px;color:var(--ink-soft);font-family:var(--mono);margin-top:4px}
+  .stamp{
+    font-family:var(--mono);
+    font-size:12px;
+    color:var(--brass-deep);
+    border:1.5px solid var(--brass);
+    border-radius:3px;
+    padding:5px 9px;
+    transform:rotate(-2deg);
+    white-space:nowrap;
+  }
+
+  /* ---------- key bar ---------- */
+  .keybar{
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:14px;
+    padding:22px 24px;
+    box-shadow:var(--shadow);
+    margin-bottom:28px;
+  }
+  .keybar .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  .keybar label.lead{font-weight:600;font-size:14px;min-width:120px}
+  .keyfield{position:relative;flex:1;min-width:220px}
+  .keyfield input{
+    width:100%;
+    font-family:var(--mono);
+    font-size:14px;
+    padding:12px 78px 12px 14px;
+    border:1px solid var(--line);
+    border-radius:9px;
+    background:var(--paper);
+    color:var(--ink);
+  }
+  .keyfield input:focus{outline:2px solid var(--brass);outline-offset:1px;border-color:var(--brass)}
+  .keyfield .reveal{
+    position:absolute;right:8px;top:50%;transform:translateY(-50%);
+    background:none;border:none;color:var(--ink-soft);cursor:pointer;
+    font-size:12px;font-family:var(--mono);padding:4px 6px;border-radius:4px;
+  }
+  .keyfield .reveal:hover{background:var(--line)}
+  .keybar .opts{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-top:12px;font-size:13px;color:var(--ink-soft)}
+  .keybar .opts label{display:flex;gap:6px;align-items:center;cursor:pointer}
+  .btn-link{background:none;border:none;color:var(--brass-deep);cursor:pointer;font-size:13px;text-decoration:underline;padding:0}
+  .keystate{font-family:var(--mono);font-size:12px;padding:2px 8px;border-radius:20px}
+  .keystate.ok{background:var(--leaf-soft);color:var(--leaf)}
+  .keystate.mock{background:#f0ecdd;color:var(--brass-deep)}
+  .keystate.bad{background:var(--alarm-soft);color:var(--alarm)}
+
+  /* ---------- defaults form ---------- */
+  details.defaults{
+    background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    margin-bottom:28px;box-shadow:var(--shadow);overflow:hidden;
+  }
+  details.defaults summary{
+    cursor:pointer;padding:18px 24px;font-weight:600;font-size:14px;
+    list-style:none;display:flex;justify-content:space-between;align-items:center;
+  }
+  details.defaults[open] summary{border-bottom:1px solid var(--line-soft)}
+  details.defaults summary::-webkit-details-marker{display:none}
+  details.defaults summary .hint{font-weight:400;color:var(--ink-soft);font-size:12px;font-family:var(--mono)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:16px;padding:20px 24px 24px}
+  .field{display:flex;flex-direction:column;gap:4px}
+  .field label{font-size:11px;font-family:var(--mono);color:var(--ink-soft);letter-spacing:.02em}
+  .field input{
+    padding:8px 10px;border:1px solid var(--line);border-radius:5px;
+    font-family:var(--mono);font-size:13px;background:var(--paper);color:var(--ink);
+  }
+  .field input:focus{outline:2px solid var(--brass);outline-offset:1px;border-color:var(--brass)}
+
+  /* ---------- dropzone ---------- */
+  .drop{
+    border:2px dashed var(--line);border-radius:16px;background:var(--panel);
+    padding:52px 24px;text-align:center;cursor:pointer;transition:border-color .18s,background .18s,transform .18s;
+    margin-bottom:28px;box-shadow:var(--shadow);
+  }
+  .drop:hover,.drop.over{border-color:var(--brass);background:#fffdf7}
+  .drop.over{transform:scale(1.006)}
+  .drop h2{font-family:"Fraunces",serif;font-weight:500;font-size:23px;margin:0 0 8px;color:var(--ink)}
+  .drop p{margin:0;color:var(--ink-soft);font-size:14px}
+  .drop .plus{
+    width:52px;height:52px;border-radius:50%;border:1.5px solid var(--brass);
+    display:grid;place-items:center;margin:0 auto 16px;color:var(--brass-deep);font-size:26px;
+    transition:transform .18s;
+  }
+  .drop:hover .plus{transform:rotate(90deg)}
+
+  /* ---------- thumbs ---------- */
+  .thumbs{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px}
+  .thumb{position:relative;width:96px;height:96px;border-radius:7px;overflow:hidden;border:1px solid var(--line)}
+  .thumb img{width:100%;height:100%;object-fit:cover}
+  .thumb button{
+    position:absolute;top:3px;right:3px;width:20px;height:20px;border-radius:50%;
+    border:none;background:rgba(20,30,25,.72);color:#fff;cursor:pointer;font-size:12px;line-height:1;
+  }
+  .thumb .tag{position:absolute;bottom:0;left:0;right:0;background:rgba(20,30,25,.72);color:#fff;font-family:var(--mono);font-size:10px;padding:2px 4px}
+
+  /* ---------- action row ---------- */
+  .actions{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:34px;align-items:center}
+  button.primary{
+    background:var(--ink);color:#fff;border:none;border-radius:10px;
+    padding:13px 26px;font-size:15px;font-weight:600;cursor:pointer;font-family:var(--sans);
+    transition:background .15s,transform .1s,box-shadow .15s;
+    box-shadow:0 2px 8px rgba(22,36,31,.14);
+  }
+  button.primary:hover{background:#0f1a15;box-shadow:0 4px 14px rgba(22,36,31,.2)}
+  button.primary:active{transform:translateY(1px)}
+  button.primary:disabled{background:var(--line);color:#9a9a92;cursor:not-allowed;box-shadow:none}
+  button.ghost{
+    background:none;border:1px solid var(--line);border-radius:10px;padding:13px 20px;
+    font-size:14px;cursor:pointer;color:var(--ink);font-family:var(--sans);transition:border-color .15s,background .15s;
+  }
+  button.ghost:hover{border-color:var(--brass);background:#fffdf7}
+  .spinner{width:16px;height:16px;border:2px solid rgba(255,255,255,.4);border-top-color:#fff;border-radius:50%;display:inline-block;animation:spin .7s linear infinite;vertical-align:-2px;margin-right:8px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* ---------- table ---------- */
+  .tablewrap{background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);overflow:hidden;margin-bottom:28px}
+  .tablewrap .thead{display:flex;justify-content:space-between;align-items:center;padding:20px 24px;border-bottom:1px solid var(--line)}
+  .tablewrap .thead h3{margin:0;font-family:"Fraunces",serif;font-weight:500;font-size:21px}
+  .tablewrap .thead .count{font-family:var(--mono);font-size:12px;color:var(--ink-soft)}
+  .scroll{overflow-x:auto}
+  table{border-collapse:collapse;width:100%;font-size:14px}
+  th{
+    text-align:left;font-family:var(--mono);font-size:11px;color:var(--ink-soft);
+    font-weight:500;padding:12px 24px;border-bottom:1px solid var(--line);white-space:nowrap;background:var(--paper);position:sticky;top:0;letter-spacing:.03em;
+  }
+  td{padding:0;border-bottom:1px solid var(--line-soft)}
+  tbody tr:nth-child(even){background:#fcfbf7}
+  tbody tr:hover{background:#fdf7ec}
+  td input{
+    width:100%;min-width:90px;border:none;background:none;padding:13px 24px;
+    font-family:var(--mono);font-size:14px;color:var(--ink);
+  }
+  td input:focus{outline:2px solid var(--brass);outline-offset:-2px;background:#fffdf7;border-radius:4px}
+  td.qty input{font-weight:600}
+  tr.flag{background:var(--alarm-soft)!important}
+  tr.flag td input{background:transparent}
+  td.del{width:34px;text-align:center}
+  td.del button{background:none;border:none;color:var(--alarm);cursor:pointer;font-size:15px;padding:6px}
+  .tfoot{padding:18px 24px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-top:1px solid var(--line)}
+  .addrow{background:none;border:1px dashed var(--line);border-radius:6px;padding:8px 14px;cursor:pointer;font-size:13px;color:var(--ink-soft)}
+  .addrow:hover{border-color:var(--brass);color:var(--brass-deep)}
+  .note{font-size:12px;color:var(--ink-soft);font-family:var(--mono)}
+  .note .fl{color:var(--alarm)}
+
+  /* ---------- toast ---------- */
+  #toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(20px);opacity:0;pointer-events:none;transition:.25s;background:var(--ink);color:#fff;padding:11px 18px;border-radius:8px;font-size:14px;z-index:50;max-width:90vw}
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  #toast.err{background:var(--alarm)}
+
+  footer{border-top:1px solid var(--line);margin-top:40px;padding:22px 0;color:var(--ink-soft);font-size:12px;font-family:var(--mono)}
+  footer .wrap{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  a{color:var(--brass-deep)}
+
+  @media(max-width:560px){
+    .brand h1{font-size:24px}
+    .keybar label.lead{min-width:100%}
+  }
+</style>
+</head>
+<body>
+<header class="masthead">
+  <div class="wrap">
+    <div class="brand">
+      <h1>Sale Order &rarr; CSV</h1>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!-- KEY BAR -->
+  <section class="keybar" aria-label="API key">
+    <div class="row">
+      <label class="lead" for="key">OpenRouter API key</label>
+      <div class="keyfield">
+        <input id="key" type="password" placeholder="sk-or-...  (leave blank to try mock mode)" autocomplete="off" spellcheck="false" />
+        <button class="reveal" id="revealBtn" type="button">show</button>
+      </div>
+      <span class="keystate mock" id="keyState">mock</span>
+    </div>
+    <div class="opts">
+      <label><input type="checkbox" id="remember" /> Remember on this device</label>
+      <button class="btn-link" id="clearKey" type="button">Clear key</button>
+    </div>
+  </section>
+
+  <!-- DEFAULTS -->
+  <details class="defaults" id="defaults">
+    <summary>Order defaults <span class="hint">these fill every row of the CSV &mdash; click to edit</span></summary>
+    <div class="grid" id="defaultsGrid"></div>
+  </details>
+
+  <!-- DROP -->
+  <div class="drop" id="drop" tabindex="0" role="button" aria-label="Add order photos">
+    <div class="plus">+</div>
+    <h2>Add order photos</h2>
+    <p>Drop images here, or click to choose. HEIC, JPG and PNG are fine.</p>
+    <input type="file" id="file" accept="image/*" multiple hidden />
+  </div>
+
+  <div class="thumbs" id="thumbs"></div>
+
+  <div class="actions">
+    <button class="primary" id="run" disabled><span id="runLabel">Read photos</span></button>
+    <button class="ghost" id="sample">Load sample rows</button>
+    <span class="note" id="status"></span>
+  </div>
+
+  <!-- TABLE -->
+  <div class="tablewrap" id="tablewrap" style="display:none">
+    <div class="thead">
+      <h3>Review &amp; edit</h3>
+      <span class="count" id="rowCount">0 rows</span>
+    </div>
+    <div class="scroll">
+      <table id="tbl">
+        <thead><tr id="headRow"></tr></thead>
+        <tbody id="body"></tbody>
+      </table>
+    </div>
+    <div class="tfoot">
+      <button class="addrow" id="addRow">+ Add empty row</button>
+      <span class="note" id="flagNote"></span>
+      <span style="flex:1"></span>
+      <button class="primary" id="download">Download CSV</button>
+    </div>
+  </div>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>JAL Sale Order tool</span>
+    <span>Read the photos, fix anything wrong, then download.</span>
+  </div>
+</footer>
+
+<div id="toast"></div>
+
+<script>
+/* ============================================================
+   CONFIG — the CSV column order matches JAL's import sample.
+   ============================================================ */
+const COLUMNS = [
+  "vrtype","dated","series_name","div_name","party_code","party_name",
+  "price_list_grp_name","emp_ucode","party_po_no","party_po_date",
+  "delivery_to_code","pucode","product","qty"
+];
+// Which fields are per-order defaults (same on every row) vs per-line (from the photo)
+const DEFAULT_FIELDS = [
+  "vrtype","dated","series_name","div_name","party_code","party_name",
+  "price_list_grp_name","emp_ucode","party_po_no","party_po_date",
+  "delivery_to_code","pucode"
+];
+const LINE_FIELDS = ["product","qty"]; // note: "product" holds the item CODE per the sample
+// Sensible JAL(MOHALI) defaults taken from the sample file (all editable in the UI)
+const DEFAULTS = {
+  vrtype:"sale order", dated:"", series_name:"SO", div_name:"JAL(MOHALI)",
+  party_code:"", party_name:"", price_list_grp_name:"", emp_ucode:"",
+  party_po_no:"", party_po_date:"", delivery_to_code:"", pucode:""
+};
+
+/* ============================================================
+   STATE
+   ============================================================ */
+let images = [];   // {id,name,dataUrl,mime}
+let rows = [];     // [{pucode?, product, qty, _flag}]
+const $ = s => document.querySelector(s);
+
+/* ============================================================
+   KEY HANDLING  (paste once, remember per device, clear)
+   ============================================================ */
+const keyInput = $("#key");
+const keyState = $("#keyState");
+
+function loadKey(){
+  // 1) shareable link:  ...#key=sk-xxxx
+  if(location.hash.startsWith("#key=")){
+    const k = decodeURIComponent(location.hash.slice(5));
+    keyInput.value = k;
+    try{ localStorage.setItem("jal_openai_key", k); }catch(e){}
+    $("#remember").checked = true;
+    history.replaceState(null,"",location.pathname+location.search); // scrub from URL bar
+  } else {
+    try{
+      const saved = localStorage.getItem("jal_openai_key");
+      if(saved){ keyInput.value = saved; $("#remember").checked = true; }
+    }catch(e){}
+  }
+  refreshKeyState();
+}
+function refreshKeyState(){
+  const k = keyInput.value.trim();
+  if(!k){
+    keyState.textContent = "mock"; keyState.className = "keystate mock";
+  } else if(!k.startsWith("sk-or-")){
+    keyState.textContent = "check key"; keyState.className = "keystate bad";
+  } else {
+    keyState.textContent = "live"; keyState.className = "keystate ok";
+  }
+}
+keyInput.addEventListener("input", ()=>{
+  refreshKeyState();
+  if($("#remember").checked){ try{ localStorage.setItem("jal_openai_key", keyInput.value.trim()); }catch(e){} }
+});
+$("#remember").addEventListener("change", e=>{
+  if(e.target.checked){ try{ localStorage.setItem("jal_openai_key", keyInput.value.trim()); }catch(e){} }
+  else { try{ localStorage.removeItem("jal_openai_key"); }catch(e){} }
+});
+$("#clearKey").addEventListener("click", ()=>{
+  keyInput.value=""; try{ localStorage.removeItem("jal_openai_key"); }catch(e){}
+  $("#remember").checked=false; refreshKeyState(); toast("Key cleared from this device.");
+});
+$("#revealBtn").addEventListener("click", ()=>{
+  const on = keyInput.type==="password";
+  keyInput.type = on ? "text" : "password";
+  $("#revealBtn").textContent = on ? "hide" : "show";
+});
+
+/* ============================================================
+   DEFAULTS FORM
+   ============================================================ */
+function buildDefaults(){
+  const grid = $("#defaultsGrid");
+  grid.innerHTML = "";
+  DEFAULT_FIELDS.forEach(f=>{
+    const wrap = document.createElement("div"); wrap.className="field";
+    const lab = document.createElement("label"); lab.textContent=f; lab.setAttribute("for","d_"+f);
+    const inp = document.createElement("input"); inp.id="d_"+f; inp.value=DEFAULTS[f]||"";
+    inp.addEventListener("input", ()=>{ DEFAULTS[f]=inp.value; try{localStorage.setItem("jal_defaults",JSON.stringify(DEFAULTS));}catch(e){} });
+    wrap.append(lab,inp); grid.append(wrap);
+  });
+}
+(function restoreDefaults(){
+  try{ const s=JSON.parse(localStorage.getItem("jal_defaults")||"null"); if(s) Object.assign(DEFAULTS,s); }catch(e){}
+  if(!DEFAULTS.dated) DEFAULTS.dated = today();
+})();
+function today(){ const d=new Date(); const p=n=>String(n).padStart(2,"0"); return `${p(d.getDate())}-${p(d.getMonth()+1)}-${d.getFullYear()}`; }
+
+/* ============================================================
+   IMAGE INTAKE  (+ HEIC handling note)
+   ============================================================ */
+const drop = $("#drop"), fileInput = $("#file");
+drop.addEventListener("click", ()=>fileInput.click());
+drop.addEventListener("keydown", e=>{ if(e.key==="Enter"||e.key===" "){e.preventDefault();fileInput.click();} });
+["dragover","dragenter"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add("over");}));
+["dragleave","drop"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove("over");}));
+drop.addEventListener("drop", e=>handleFiles(e.dataTransfer.files));
+fileInput.addEventListener("change", e=>handleFiles(e.target.files));
+
+async function handleFiles(fileList){
+  const files = [...fileList].filter(f=>f.type.startsWith("image/") || /\.hei[cf]$/i.test(f.name));
+  if(!files.length){ toast("Those weren't images.","err"); return; }
+  for(const f of files){
+    const isHeic = /\.hei[cf]$/i.test(f.name) || f.type==="image/heic" || f.type==="image/heif";
+    let dataUrl, mime=f.type||"image/jpeg";
+    if(isHeic){
+      // Browsers can't send HEIC to the API. Ask the user to convert, but still show a placeholder.
+      toast("HEIC photo detected — please export as JPG on your phone first.","err");
+      continue;
+    } else {
+      dataUrl = await readAsDataURL(f);
+    }
+    images.push({id:crypto.randomUUID(), name:f.name, dataUrl, mime});
+  }
+  renderThumbs();
+  $("#run").disabled = images.length===0;
+}
+function readAsDataURL(file){
+  return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=rej; r.readAsDataURL(file); });
+}
+function renderThumbs(){
+  const box=$("#thumbs"); box.innerHTML="";
+  images.forEach(img=>{
+    const d=document.createElement("div"); d.className="thumb";
+    d.innerHTML=`<img src="${img.dataUrl}" alt=""><span class="tag">${img.name.slice(0,14)}</span>`;
+    const x=document.createElement("button"); x.textContent="×"; x.title="Remove";
+    x.onclick=()=>{ images=images.filter(i=>i.id!==img.id); renderThumbs(); $("#run").disabled=images.length===0; };
+    d.append(x); box.append(d);
+  });
+}
+
+/* ============================================================
+   READ PHOTOS  →  rows
+   ============================================================ */
+const EXTRACT_PROMPT =
+`You are reading a HANDWRITTEN sale order for a hardware/sanitary distributor.
+Each entry is a PRODUCT CODE together with a QUANTITY. Layouts vary:
+ - "code over a line, quantity under it" (e.g. 1436 / 6)
+ - "code = quantity" or "code - quantity" on one line
+ - grids of code/qty pairs
+Codes are alphanumeric and may include letters, e.g. 40120N, 32551RES25, J-381, IP437, 91556.
+Quantities are whole numbers; ignore units like "pcs"/"pc".
+Return ONLY valid JSON, no prose, no markdown fences, of the form:
+{"rows":[{"product":"<code exactly as written>","qty":<integer>,"confidence":"high|low"}]}
+Use "low" confidence for anything you are unsure about (messy, crossed out, or ambiguous digits).
+Do not invent entries. If a value is unreadable, still include the row with your best guess and confidence "low".`;
+
+$("#run").addEventListener("click", readPhotos);
+async function readPhotos(){
+  const key = keyInput.value.trim();
+  setBusy(true, key ? "Reading with OpenAI…" : "Building mock rows…");
+  try{
+    let got = [];
+    if(!key){
+      got = await mockExtract();
+    } else if(!key.startsWith("sk-or-")){
+      throw new Error("That key doesn't look like an OpenRouter key (should start with sk-or-).");
+    } else {
+      for(let i=0;i<images.length;i++){
+        setBusy(true, `Reading photo ${i+1} of ${images.length}…`);
+        const part = await callOpenRouter(key, images[i]);
+        got = got.concat(part);
+      }
+    }
+    if(!got.length){ toast("No rows found in those photos.","err"); setBusy(false); return; }
+    rows = got.map(r=>({product:String(r.product??"").trim(), qty:r.qty??"", _flag:r.confidence==="low"}));
+    renderTable();
+    toast(`${rows.length} rows ready. Please check the highlighted ones.`);
+  }catch(err){
+    console.error(err);
+    toast(err.message||"Something went wrong reading the photos.","err");
+  }finally{
+    setBusy(false);
+  }
+}
+function setBusy(on,msg){
+  const btn=$("#run"), lab=$("#runLabel");
+  btn.disabled = on || images.length===0;
+  lab.innerHTML = on ? `<span class="spinner"></span>${msg||"Working…"}` : "Read photos";
+  $("#status").textContent = on ? "" : ($("#status").textContent);
+}
+
+async function callOpenRouter(key, image){
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions",{
+    method:"POST",
+    headers:{
+      "Content-Type":"application/json",
+      "Authorization":"Bearer "+key,
+      "HTTP-Referer":"https://jal-order-to-csv",
+      "X-Title":"JAL Sale Order to CSV"
+    },
+    body: JSON.stringify({
+      model:"openai/gpt-4o",
+      temperature:0,
+      messages:[
+        {role:"system",content:EXTRACT_PROMPT},
+        {role:"user",content:[
+          {type:"text",text:"Read every code and quantity from this order photo."},
+          {type:"image_url",image_url:{url:image.dataUrl, detail:"high"}}
+        ]}
+      ]
+    })
+  });
+  if(!res.ok){
+    let m = `OpenRouter error ${res.status}`;
+    try{ const e=await res.json(); if(e.error?.message) m=e.error.message; }catch(_){}
+    if(res.status===401) m="OpenRouter rejected the key (401). Check the key and your credit.";
+    throw new Error(m);
+  }
+  const data = await res.json();
+  const text = data.choices?.[0]?.message?.content || "";
+  return parseRows(text);
+}
+function parseRows(text){
+  let t = text.trim().replace(/^```json/i,"").replace(/^```/,"").replace(/```$/,"").trim();
+  const s=t.indexOf("{"), e=t.lastIndexOf("}");
+  if(s>=0 && e>=0) t=t.slice(s,e+1);
+  try{ const j=JSON.parse(t); return Array.isArray(j.rows)?j.rows:[]; }
+  catch(_){ return []; }
+}
+
+/* mock extraction: pretend to read, using codes drawn from the real photos */
+async function mockExtract(){
+  await new Promise(r=>setTimeout(r,700));
+  const demo = [
+    {product:"1436",qty:6,confidence:"high"},{product:"14365",qty:10,confidence:"high"},
+    {product:"14940525",qty:4,confidence:"low"},{product:"14077",qty:8,confidence:"high"},
+    {product:"45077",qty:1,confidence:"high"},{product:"1426",qty:3,confidence:"low"},
+    {product:"40122N",qty:1,confidence:"high"},{product:"57362",qty:20,confidence:"high"},
+    {product:"IP437",qty:15,confidence:"high"},{product:"J-65256-13",qty:1,confidence:"low"}
+  ];
+  // scale roughly to how many photos were added, so the demo feels responsive
+  const n = Math.max(1, images.length);
+  let out=[]; for(let i=0;i<n;i++) out=out.concat(demo.slice(0, i===0?demo.length:5));
+  return out;
+}
+
+$("#sample").addEventListener("click", async ()=>{
+  rows = (await mockExtract()).map(r=>({product:r.product,qty:r.qty,_flag:r.confidence==="low"}));
+  renderTable(); toast("Loaded sample rows so you can see the flow.");
+});
+
+/* ============================================================
+   TABLE  (editable)
+   ============================================================ */
+function renderTable(){
+  $("#tablewrap").style.display = rows.length ? "block" : "none";
+  const head=$("#headRow"); head.innerHTML="";
+  // show CODE + QTY as the editable columns (the rest come from defaults)
+  ["pucode / code","qty",""].forEach((h,i)=>{
+    const th=document.createElement("th"); th.textContent=h; if(i===2) th.style.width="34px"; head.append(th);
+  });
+  const body=$("#body"); body.innerHTML="";
+  rows.forEach((r,idx)=>{
+    const tr=document.createElement("tr"); if(r._flag) tr.className="flag";
+    const c1=document.createElement("td");
+    const i1=document.createElement("input"); i1.value=r.product; i1.placeholder="item code";
+    i1.oninput=()=>{ r.product=i1.value; r._flag=false; tr.classList.remove("flag"); updateFlagNote(); };
+    c1.append(i1);
+    const c2=document.createElement("td"); c2.className="qty";
+    const i2=document.createElement("input"); i2.value=r.qty; i2.inputMode="numeric"; i2.placeholder="qty";
+    i2.oninput=()=>{ r.qty=i2.value; };
+    c2.append(i2);
+    const c3=document.createElement("td"); c3.className="del";
+    const del=document.createElement("button"); del.textContent="🗑"; del.title="Delete row";
+    del.onclick=()=>{ rows.splice(idx,1); renderTable(); };
+    c3.append(del);
+    tr.append(c1,c2,c3); body.append(tr);
+  });
+  $("#rowCount").textContent = `${rows.length} row${rows.length===1?"":"s"}`;
+  updateFlagNote();
+}
+function updateFlagNote(){
+  const n = rows.filter(r=>r._flag).length;
+  $("#flagNote").innerHTML = n ? `<span class="fl">● ${n} low-confidence</span> — highlighted rows may be misread` : "";
+}
+$("#addRow").addEventListener("click", ()=>{ rows.push({product:"",qty:"",_flag:false}); renderTable(); });
+
+/* ============================================================
+   CSV EXPORT  (exact column order)
+   ============================================================ */
+$("#download").addEventListener("click", ()=>{
+  if(!rows.length){ toast("No rows to export.","err"); return; }
+  const esc = v => { v=(v==null?"":String(v)); return /[",\n\r]/.test(v)? '"'+v.replace(/"/g,'""')+'"' : v; };
+  const lines = [ COLUMNS.join(",") ];
+  rows.forEach(r=>{
+    const rec = {...DEFAULTS, product:r.product, qty:r.qty};
+    lines.push( COLUMNS.map(c=>esc(rec[c])).join(",") );
+  });
+  const blob = new Blob([lines.join("\r\n")+"\r\n"], {type:"text/csv"});
+  const url = URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  const stamp = (DEFAULTS.dated||today()).replace(/[^0-9A-Za-z]/g,"");
+  a.href=url; a.download=`JAL_sale_order_${stamp}.csv`; a.click();
+  URL.revokeObjectURL(url);
+  toast("CSV downloaded.");
+});
+
+/* ============================================================
+   TOAST + INIT
+   ============================================================ */
+let toastTimer;
+function toast(msg,kind){
+  const t=$("#toast"); t.textContent=msg; t.className = kind==="err"?"err show":"show";
+  clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.className=t.className.replace("show",""),3200);
+}
+buildDefaults();
+loadKey();
+</script>
+</body>
+</html>
