@@ -191,6 +191,25 @@
   td.qty input{font-weight:600}
   tr.flag{background:var(--alarm-soft)!important}
   tr.flag td input{background:transparent}
+  tr.warnrow{background:#FFF8E6!important}
+  tr.warnrow td input{background:transparent}
+  td.status{padding:8px 12px;white-space:nowrap}
+  .badge{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px}
+  .badge.ok{background:var(--leaf-soft);color:var(--leaf)}
+  .badge.warn{background:#FBECC6;color:#8A5D1C}
+  .badge.bad{background:var(--alarm-soft);color:var(--alarm)}
+  .badge.alnum{background:#E3ECFA;color:#2B4F8C}
+  tr.alnumrow{background:#F1F6FD!important}
+  tr.alnumrow td input{background:transparent}
+  .note .al{color:#2B4F8C}
+  .badge.box{background:#EFE9DD;color:#6B5A3A}
+  img.linecrop{display:block;max-height:38px;max-width:260px;margin:0 24px 10px;margin-top:-4px;border:1px solid var(--line);border-radius:4px;cursor:zoom-in;background:#fff}
+  img.linecrop.big{max-height:none;max-width:min(560px,80vw);cursor:zoom-out}
+  .boxnote{display:block;font-family:var(--sans);font-size:11px;color:var(--ink-soft);padding:0 24px 10px;margin-top:-6px;white-space:normal;max-width:300px}
+  .boxnote:empty{display:none}
+  .boxnote.warn{color:#8A5D1C}
+  .boxnote.bad{color:var(--alarm);font-weight:600}
+  .statusnote{display:block;font-family:var(--sans);font-size:11px;color:var(--ink-soft);margin-top:2px}
   td.del{width:34px;text-align:center}
   td.del button{background:none;border:none;color:var(--alarm);cursor:pointer;font-size:15px;padding:6px}
   .tfoot{padding:18px 24px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-top:1px solid var(--line)}
@@ -238,7 +257,7 @@
     <div class="opts">
       <label><input type="checkbox" id="remember" /> Remember on this device</label>
       <button class="btn-link" id="clearKey" type="button">Clear key</button>
-    </div>
+      <label title="Lines that look doubtful, or that look like another real code, get a second look by the stronger model, from small cropped strips of just those lines, with a shortlist of catalogue codes. One extra request per page that has doubtful lines."><input type="checkbox" id="doubleCheck" checked /> Double-check doubtful lines</label>    </div>
   </section>
 
   <!-- DEFAULTS -->
@@ -250,9 +269,9 @@
   <!-- DROP -->
   <div class="drop" id="drop" tabindex="0" role="button" aria-label="Add order photos">
     <div class="plus">+</div>
-    <h2>Add order photos</h2>
-    <p>Drop images here, or click to choose. HEIC, JPG and PNG are fine.</p>
-    <input type="file" id="file" accept="image/*" multiple hidden />
+    <h2>Add order photos or PDFs</h2>
+    <p>Drop files here, or click to choose. Any photo format works (JPG, PNG, HEIC, WebP, TIFF…), and each PDF page is read separately.</p>
+    <input type="file" id="file" accept="image/*,.heic,.heif,.tif,.tiff,.pdf,application/pdf" multiple hidden />
   </div>
 
   <div class="thumbs" id="thumbs"></div>
@@ -279,6 +298,7 @@
       <button class="addrow" id="addRow">+ Add empty row</button>
       <span class="note" id="flagNote"></span>
       <span style="flex:1"></span>
+      <button class="ghost" id="downloadXlsx">Export flagged Excel</button>
       <button class="primary" id="download">Download CSV</button>
     </div>
   </div>
@@ -294,10 +314,27 @@
 
 <div id="toast"></div>
 
+<script src="vendor/exceljs.min.js"></script>
+<script src="vendor/cadcodes.js"></script>
+<script src="vendor/boxsizes.js"></script>
 <script>
 /* ============================================================
-   CONFIG — the CSV column order matches JAL's import sample.
+   CONFIG
    ============================================================ */
+/* >>> MODELS — any OpenRouter model ID works (https://openrouter.ai/models).
+   If an ID is wrong, the app shows an OpenRouter error naming it.
+
+   READ_MODEL  reads every full photo: codes, quantities, and where each line is.
+               Cheap, because it sees every page.
+   CHECK_MODEL looks again at doubtful lines only, from small cropped strips,
+               choosing from a shortlist of real catalogue codes. Stronger, and
+               it only ever sees the strips, never the full page (unless a line's
+               position is missing, then it gets the page instead).
+   To go back to one model for everything, set both to the same ID. */
+const READ_MODEL  = "google/gemini-3.1-flash-lite";
+const CHECK_MODEL = "anthropic/claude-sonnet-5.5";
+
+/* the CSV column order matches JAL's import sample */
 const COLUMNS = [
   "vrtype","dated","series_name","div_name","party_code","party_name",
   "price_list_grp_name","emp_ucode","party_po_no","party_po_date",
@@ -395,7 +432,10 @@ function buildDefaults(){
 function today(){ const d=new Date(); const p=n=>String(n).padStart(2,"0"); return `${p(d.getDate())}-${p(d.getMonth()+1)}-${d.getFullYear()}`; }
 
 /* ============================================================
-   IMAGE INTAKE  (+ HEIC handling note)
+   FILE INTAKE — PDFs and every common image format.
+   Everything is converted to a JPEG (max 2000px side) in the
+   browser before it is sent, so the API always gets one format.
+   Helper libraries load only when a file needs them.
    ============================================================ */
 const drop = $("#drop"), fileInput = $("#file");
 drop.addEventListener("click", ()=>fileInput.click());
@@ -405,26 +445,127 @@ drop.addEventListener("keydown", e=>{ if(e.key==="Enter"||e.key===" "){e.prevent
 drop.addEventListener("drop", e=>handleFiles(e.dataTransfer.files));
 fileInput.addEventListener("change", e=>handleFiles(e.target.files));
 
+const MAX_SIDE = 2000;        // longest side sent to the model, in pixels
+const MAX_PDF_PAGES = 20;     // safety cap so a huge PDF can't run up the bill
+
+const loaded = {};
+function loadScript(src){
+  if(!loaded[src]){
+    loaded[src] = new Promise((res,rej)=>{
+      const s=document.createElement("script"); s.src=src; s.onload=res;
+      s.onerror=()=>{ delete loaded[src]; rej(new Error("Couldn't load "+src)); };
+      document.head.append(s);
+    });
+  }
+  return loaded[src];
+}
+
+function fileKind(f){
+  const n=f.name.toLowerCase(), t=(f.type||"").toLowerCase();
+  if(t==="application/pdf" || n.endsWith(".pdf")) return "pdf";
+  if(/hei[cf]/.test(t) || /\.hei[cf]$/.test(n)) return "heic";
+  if(/tiff/.test(t) || /\.tiff?$/.test(n)) return "tiff";
+  if(t.startsWith("image/") || /\.(jpe?g|jfif|png|webp|gif|bmp|avif|svg|ico)$/.test(n)) return "image";
+  return null;
+}
+
 async function handleFiles(fileList){
-  const files = [...fileList].filter(f=>f.type.startsWith("image/") || /\.hei[cf]$/i.test(f.name));
-  if(!files.length){ toast("Those weren't images.","err"); return; }
+  const files=[...fileList]; if(!files.length) return;
+  let added=0; const failed=[];
   for(const f of files){
-    const isHeic = /\.hei[cf]$/i.test(f.name) || f.type==="image/heic" || f.type==="image/heif";
-    let dataUrl, mime=f.type||"image/jpeg";
-    if(isHeic){
-      // Browsers can't send HEIC to the API. Ask the user to convert, but still show a placeholder.
-      toast("HEIC photo detected — please export as JPG on your phone first.","err");
-      continue;
-    } else {
-      dataUrl = await readAsDataURL(f);
-    }
-    images.push({id:crypto.randomUUID(), name:f.name, dataUrl, mime});
+    const kind=fileKind(f);
+    if(!kind){ failed.push(f.name); continue; }
+    try{
+      toast(`Preparing ${f.name}…`);
+      const pages = await toJpegs(f, kind);
+      for(const p of pages){ images.push({id:crypto.randomUUID(), name:p.name, dataUrl:p.dataUrl, mime:"image/jpeg"}); added++; }
+    }catch(err){ console.error(f.name, err); failed.push(f.name); }
   }
   renderThumbs();
   $("#run").disabled = images.length===0;
+  fileInput.value = "";
+  if(failed.length) toast(`Couldn't open: ${failed.join(", ")}`,"err");
+  else if(added) toast(`${added} page${added===1?"":"s"} ready to read.`);
 }
-function readAsDataURL(file){
-  return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=rej; r.readAsDataURL(file); });
+
+async function toJpegs(f, kind){
+  if(kind==="pdf")  return pdfToJpegs(f);
+  if(kind==="tiff") return tiffToJpegs(f);
+  if(kind==="heic") return [{ name:f.name, dataUrl: await heicToJpeg(f) }];
+  return [{ name:f.name, dataUrl: await blobToJpeg(f) }];
+}
+
+// draw any image source onto a white canvas, shrink if needed, export JPEG
+function canvasToJpeg(src, w, h){
+  w = w || 1200; h = h || 1600;
+  const s = Math.min(1, MAX_SIDE/Math.max(w,h));
+  const c=document.createElement("canvas"); c.width=Math.round(w*s); c.height=Math.round(h*s);
+  const ctx=c.getContext("2d");
+  ctx.fillStyle="#fff"; ctx.fillRect(0,0,c.width,c.height);   // transparent PNGs get a white page
+  ctx.drawImage(src,0,0,c.width,c.height);
+  return c.toDataURL("image/jpeg",0.9);
+}
+
+// JPG, PNG, WebP, GIF, BMP, AVIF, SVG… anything the browser can decode
+async function blobToJpeg(blob){
+  if(window.createImageBitmap){
+    try{
+      const bmp = await createImageBitmap(blob, {imageOrientation:"from-image"});  // respects phone rotation
+      const out = canvasToJpeg(bmp, bmp.width, bmp.height); bmp.close && bmp.close(); return out;
+    }catch(_){ /* fall through to <img> */ }
+  }
+  const url = URL.createObjectURL(blob);
+  try{
+    const img = await new Promise((res,rej)=>{ const i=new Image(); i.onload=()=>res(i); i.onerror=()=>rej(new Error("Can't decode image")); i.src=url; });
+    return canvasToJpeg(img, img.naturalWidth, img.naturalHeight);
+  }finally{ URL.revokeObjectURL(url); }
+}
+
+// iPhone HEIC/HEIF: Safari decodes it natively; other browsers use heic-to
+async function heicToJpeg(f){
+  try{ return await blobToJpeg(f); }catch(_){}
+  await loadScript("vendor/heic-to.js");
+  const jpeg = await HeicTo({ blob:f, type:"image/jpeg", quality:0.9 });
+  return blobToJpeg(jpeg);
+}
+
+// TIFF (incl. multi-page scans): Safari decodes natively; others use UTIF
+async function tiffToJpegs(f){
+  try{ return [{ name:f.name, dataUrl: await blobToJpeg(f) }]; }catch(_){}
+  await loadScript("vendor/pako_inflate.min.js");
+  await loadScript("vendor/UTIF.js");
+  const buf = await f.arrayBuffer();
+  const ifds = UTIF.decode(buf); const out=[];
+  ifds.forEach((ifd,i)=>{
+    UTIF.decodeImage(buf, ifd, ifds);
+    if(!ifd.width || !ifd.height) return;
+    const rgba = UTIF.toRGBA8(ifd);
+    const c=document.createElement("canvas"); c.width=ifd.width; c.height=ifd.height;
+    c.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(rgba.buffer), ifd.width, ifd.height),0,0);
+    out.push({ name: ifds.length>1 ? `${f.name} p${i+1}` : f.name, dataUrl: canvasToJpeg(c, c.width, c.height) });
+  });
+  if(!out.length) throw new Error("No pages found in TIFF");
+  return out;
+}
+
+// PDF: each page becomes its own image (one read per page)
+async function pdfToJpegs(f){
+  await loadScript("vendor/pdf.min.js");
+  const lib = window.pdfjsLib;
+  lib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
+  const doc = await lib.getDocument({ data: new Uint8Array(await f.arrayBuffer()) }).promise;
+  const n = Math.min(doc.numPages, MAX_PDF_PAGES); const out=[];
+  for(let p=1; p<=n; p++){
+    const page = await doc.getPage(p);
+    const base = page.getViewport({ scale:1 });
+    const vp = page.getViewport({ scale: Math.min(4, MAX_SIDE/Math.max(base.width, base.height)) });
+    const c=document.createElement("canvas"); c.width=Math.floor(vp.width); c.height=Math.floor(vp.height);
+    const ctx=c.getContext("2d"); ctx.fillStyle="#fff"; ctx.fillRect(0,0,c.width,c.height);
+    await page.render({ canvasContext:ctx, viewport:vp }).promise;
+    out.push({ name: doc.numPages>1 ? `${f.name} p${p}` : f.name, dataUrl: c.toDataURL("image/jpeg",0.9) });
+  }
+  if(doc.numPages > MAX_PDF_PAGES) setTimeout(()=>toast(`${f.name}: only the first ${MAX_PDF_PAGES} pages were added.`,"err"), 400);
+  return out;
 }
 function renderThumbs(){
   const box=$("#thumbs"); box.innerHTML="";
@@ -446,34 +587,418 @@ Each entry is a PRODUCT CODE together with a QUANTITY. Layouts vary:
  - "code over a line, quantity under it" (e.g. 1436 / 6)
  - "code = quantity" or "code - quantity" on one line
  - grids of code/qty pairs
-Codes are alphanumeric and may include letters, e.g. 40120N, 32551RES25, J-381, IP437, 91556.
-Quantities are whole numbers; ignore units like "pcs"/"pc".
+Codes are alphanumeric and may include letters, e.g. 40120N, 32551RES25, J-381, IP437, 91556, PT12360-26.
+
+QUANTITY AND UNIT — record the number exactly as written, and its unit separately:
+ - "pcs", "pc", "nos", or no unit at all  -> unit "pcs"
+ - "box", "bx", "1 Box", "½ Box"           -> unit "box"
+ - "master box", "master", "MB", "carton", "ctn" -> unit "master_box"
+ - Fractions are allowed: "½ box" or "1/2 box" -> qty 0.5, unit "box". "1½" -> 1.5.
+ - A stray inch mark after a fraction ("½" box") is just how ½ is written; ignore it.
+ Do NOT convert boxes to pieces yourself — the app does that.
+
+CRITICAL — return the PRODUCT CODE ONLY, never the description:
+ - If a line reads "SINGLE LIVER BASIN MIXER (EL11220-CH)" the code is "EL11220-CH".
+ - If a line reads "HADE SHOWERS 382-79" the code is "382-79".
+ - If a line reads "81390 TWO WAY TAPS" the code is "81390".
+ - Never put item names, words, or units in the "product" field — only the code itself.
+Read letters vs digits carefully — do not guess. Common confusions to watch: B vs 8, O vs 0, I/L vs 1, S vs 5, Z vs 2, G vs 6. Transcribe exactly what is written; the app will match it against the official code list.
+
+LOCATION — for every row also give "box": where that entry is written on the photo, as
+[ymin, xmin, ymax, xmax] on a 0–1000 scale (0,0 = top-left of the photo, 1000,1000 = bottom-right).
+The box must cover the code AND its quantity (if the quantity is under the code, include both).
+
 Return ONLY valid JSON, no prose, no markdown fences, of the form:
-{"rows":[{"product":"<code exactly as written>","qty":<integer>,"confidence":"high|low"}]}
+{"rows":[{"product":"<code only, exactly as written>","qty":<number>,"unit":"pcs|box|master_box","confidence":"high|low","box":[ymin,xmin,ymax,xmax]}]}
 Use "low" confidence for anything you are unsure about (messy, crossed out, or ambiguous digits).
 Do not invent entries. If a value is unreadable, still include the row with your best guess and confidence "low".`;
+
+/* ============================================================
+   CODE VALIDATION & CORRECTION against the master CAD list
+   ============================================================ */
+const CODES = Array.isArray(window.JAL_CADCODES) ? window.JAL_CADCODES : [];
+const CODE_SET = new Set(CODES.map(c=>c.toUpperCase()));
+const CANON = new Map(CODES.map(c=>[c.toUpperCase(), c]));   // upper-case -> catalogue spelling
+// bucket codes by length for fast near-match lookup ([original, upper-case] pairs)
+const CODES_BY_LEN = {};
+for(const c of CODES){ (CODES_BY_LEN[c.length] ||= []).push([c, c.toUpperCase()]); }
+
+// Handwriting adds or drops spaces, dots and hyphens ("PT 12360-26", "PT-12480-31").
+// Compare with those removed. The few codes that clash this way (e.g. 1281-D / 1281D)
+// are marked ambiguous and skipped, so they fall back to normal matching.
+const squash = s => String(s).toUpperCase().replace(/[\s.\-\/]/g,"");
+const BY_SQUASH = new Map();
+for(const c of CODES){ const k=squash(c); BY_SQUASH.set(k, BY_SQUASH.has(k) ? null : c); }
+function lookup(s){
+  const up = String(s||"").trim().toUpperCase().replace(/\s+/g," ");
+  if(!up) return null;
+  if(CODE_SET.has(up)) return CANON.get(up);
+  return BY_SQUASH.get(squash(up)) || null;
+}
+
+// characters that handwriting / OCR commonly confuse, both directions
+const CONFUSE = {
+  "8":"B","B":"8","0":"O","O":"0","1":"I","I":"1","L":"1",
+  "5":"S","S":"5","2":"Z","Z":"2","6":"G","G":"6","7":"T","T":"7"
+};
+
+// strip anything that isn't part of a code, pull a code out of a description if needed
+function cleanToken(raw){
+  let s = String(raw||"").trim().toUpperCase();
+  // if there's a parenthetical code, prefer it
+  const m = s.match(/\(([^)]+)\)/);
+  if(m && /\d/.test(m[1])) s = m[1].trim();
+  // if still has spaces, take the most code-like token (has a digit, letters/digits/hyphen)
+  if(/\s/.test(s)){
+    const toks = s.split(/\s+/).filter(t=>/\d/.test(t) && /^[A-Z0-9()\/-]+$/.test(t));
+    if(toks.length) s = toks.sort((a,b)=>b.length-a.length)[0];
+  }
+  return s.replace(/[^A-Z0-9()\/-]/g,"");
+}
+
+// edit distance limited to 1-2, counting a "confusable" swap as a near-zero cost
+function closeMatch(code){
+  const hit = lookup(code);
+  if(hit) return { code: hit, status:"exact" };
+  // try candidates of same length (and ±1) and score by confusable-aware distance
+  const up = code.toUpperCase();
+  let best=null, bestScore=1e9;
+  for(const L of [up.length, up.length-1, up.length+1]){
+    const bucket = CODES_BY_LEN[L]; if(!bucket) continue;
+    for(const [cand, candUp] of bucket){
+      const sc = score(up, candUp, Math.min(bestScore, 2.5));
+      if(sc < bestScore){ bestScore=sc; best=cand; }
+    }
+  }
+  // accept a correction only when it's clearly close
+  if(best && bestScore <= 1.5) return { code: best, status:"corrected", from: code };
+  return { code: code, status:"unknown" };
+}
+// weighted distance: confusable substitution = 0.5, other sub/indel = 1.
+// Stops early (returns Infinity) once the distance must exceed `cut`.
+function score(a, b, cut=Infinity){
+  const m=a.length, n=b.length;
+  if(Math.abs(m-n) > cut) return Infinity;
+  let prev=new Array(n+1), cur=new Array(n+1);
+  for(let j=0;j<=n;j++) prev[j]=j;
+  for(let i=1;i<=m;i++){
+    cur[0]=i; let rowMin=i;
+    for(let j=1;j<=n;j++){
+      const ca=a[i-1], cb=b[j-1];
+      const sub = ca===cb ? 0 : (CONFUSE[ca]===cb ? 0.5 : 1);
+      const v = Math.min(prev[j]+1, cur[j-1]+1, prev[j-1]+sub);
+      cur[j]=v; if(v<rowMin) rowMin=v;
+    }
+    if(rowMin > cut) return Infinity;
+    [prev,cur]=[cur,prev];
+  }
+  return prev[n];
+}
+// every catalogue code within `maxScore` of `code`, closest first
+function nearby(code, maxScore, limit){
+  const up=String(code||"").toUpperCase(); const out=[];
+  if(!up) return out;
+  for(const L of [up.length-1, up.length, up.length+1]){
+    const bucket=CODES_BY_LEN[L]; if(!bucket) continue;
+    for(const [c, cu] of bucket){ const s=score(up, cu, maxScore); if(s<=maxScore) out.push({code:c, score:s}); }
+  }
+  out.sort((a,b)=>a.score-b.score || a.code.localeCompare(b.code));
+  return out.slice(0, limit);
+}
+
+// pieces of a reading that might be the code: the whole thing, a (bracketed) part,
+// single words that contain a digit, and 2–3 neighbouring words joined ("PT 12360-26")
+function codeCandidates(raw){
+  const s=String(raw||"").trim().toUpperCase().replace(/\s+/g," ");
+  if(!s) return [];
+  const list=[s];
+  const m=s.match(/\(([^)]+)\)/); if(m) list.push(m[1].trim());
+  const toks=s.replace(/[()]/g," ").split(" ").filter(Boolean);
+  for(let i=0;i<toks.length;i++){
+    for(let k=1;k<=3 && i+k<=toks.length;k++){
+      const joined=toks.slice(i,i+k).join("");
+      if(/\d/.test(joined) && joined.length>=3) list.push(joined);
+    }
+  }
+  return list;
+}
+
+// turn a raw AI reading into {product, status, note, _flag}
+function resolveCode(raw){
+  for(const cand of codeCandidates(raw)){
+    const hit = lookup(cand);
+    if(hit) return { product:hit, status:"exact", note:"", _flag:false };
+  }
+  const cleaned = cleanToken(raw);
+  if(!cleaned) return { product:"", status:"unknown", note:"Empty / unreadable", _flag:true };
+  const r = closeMatch(cleaned);
+  if(r.status==="exact")     return { product:r.code, status:"exact",     note:"", _flag:false };
+  if(r.status==="corrected") return { product:r.code, status:"corrected", note:`Auto-corrected from "${r.from}"`, _flag:true };
+  return { product:cleaned, status:"unknown", note:"Not in catalogue — check", _flag:true };
+}
+
+/* ============================================================
+   SECOND CHECK — re-ask the model about doubtful lines only,
+   giving it a shortlist of real catalogue codes to choose from.
+   The photo is cached on the first request, so the second
+   request re-reads it at about a tenth of the normal price.
+   ============================================================ */
+const doubleBox = $("#doubleCheck");
+try{ const v=localStorage.getItem("jal_doublecheck"); if(v!==null) doubleBox.checked = v==="1"; }catch(e){}
+doubleBox.addEventListener("change", ()=>{ try{ localStorage.setItem("jal_doublecheck", doubleBox.checked?"1":"0"); }catch(e){} });
+
+/* ============================================================
+   BOXES — orders may say "1 BOX" / "½ BOX". A box is the small box
+   unless "master box"/"carton" is written. Pieces = boxes × pieces
+   per box, looked up in vendor/boxsizes.js (built from data/*.csv).
+   ============================================================ */
+const BOXES = window.JAL_BOXSIZES || {};
+function unitOf(u){
+  u = String(u||"").toLowerCase();
+  if(/master|carton|ctn|^mb$/.test(u)) return "master_box";
+  if(/box|bx/.test(u)) return "box";
+  return "pcs";
+}
+const fmtNum = n => { const x=Number(n); return Number.isFinite(x) ? String(Math.round(x*100)/100) : String(n??""); };
+function orderedText(row){
+  if(row.unit==="pcs") return `${fmtNum(row.ordered)} pcs`;
+  const word = row.unit==="box" ? "box" : "master box";
+  return `${fmtNum(row.ordered)} ${word}${Number(row.ordered)===1 || Number(row.ordered)<1 ? "" : "es"}`;
+}
+// work out pieces for a box row; call again whenever the code changes
+function applyBox(row){
+  if(row.unit!=="box" && row.unit!=="master_box"){ row.box=null; return; }
+  const n = Number(row.ordered);
+  const hit = BOXES[row.product] || BOXES[CANON.get(String(row.product).toUpperCase())];
+  if(!hit || !Number.isFinite(n)){ row.box = {per:null, source:"unknown", ref:"", manual:false}; row.qty=""; return; }
+  const per = row.unit==="box" ? hit[0] : hit[1];
+  const pcs = Math.round(n*per*100)/100;
+  row.box = {per, source:hit[2], ref:hit[3], manual:false, fraction:!Number.isInteger(pcs)};
+  row.qty = pcs;
+}
+// "" = fine, "warn" = staff should confirm, "bad" = quantity missing
+function boxIssue(row){
+  const b=row.box; if(!b) return "";
+  if(b.manual) return "";
+  if(b.source==="unknown") return "bad";
+  if(b.source==="type" || b.fraction) return "warn";
+  return "";
+}
+function boxNote(row){
+  const b=row.box; if(!b) return "";
+  const what = orderedText(row);
+  if(b.manual) return `${what} — pieces entered by hand`;
+  if(b.source==="unknown") return `${what} — box size not known for this code. Type the pieces.`;
+  let s = `${what} × ${b.per} pcs`;
+  if(b.source==="sheet")  s += " (box sheet)";
+  if(b.source==="colour") s += ` (same as ${b.ref}, other colour)`;
+  if(b.source==="type")   s += ` — estimated from “${b.ref}”, please confirm`;
+  if(b.fraction)          s += " — not a whole number, check";
+  return s;
+}
+
+// a model reading -> table row
+function buildRow(r){
+  const raw = String(r.product??"").trim();
+  const low = r.confidence==="low";
+  const res = CODES.length ? resolveCode(raw) : {product:raw, status:"", note:"", _flag:false};
+  const unit = unitOf(r.unit);
+  const ordered = r.qty??"";
+  const row = { product:res.product, ordered, unit, qty: unit==="pcs" ? ordered : "", box:null,
+                status:res.status, note:res.note, _flag:res._flag||low, _raw:raw, _low:low,
+                _pos: validBox(r.box), _crop:null };   // _pos = where the line is on the photo
+  applyBox(row);
+  return row;
+}
+
+// the reading squeezed down to code characters, for finding look-alike codes
+function readKey(raw){
+  const s=String(raw||"").toUpperCase();
+  const m=s.match(/\(([^)]+)\)/);
+  return (m && /\d/.test(m[1]) ? m[1] : s).replace(/[^A-Z0-9\/.-]/g,"");
+}
+
+// Which rows are worth a second look, and which codes could they really be?
+// Returns up to 5 catalogue codes, or null when the row is clearly fine.
+function shortlistFor(row){
+  if(!CODES.length || !row._raw) return null;
+  let opts;
+  if(row.status==="exact"){
+    // matched — but is there a real code one character away? (PT12362-31 vs PT12363-31)
+    const twins = nearby(row.product, 1, 5).filter(x=>x.code!==row.product);
+    if(!twins.length && !row._low) return null;
+    opts = [row.product, ...twins.map(x=>x.code)];
+  }else{
+    opts = nearby(readKey(row._raw), 2.5, 5).map(x=>x.code);
+    if(row.status==="corrected" && !opts.includes(row.product)) opts.unshift(row.product);
+  }
+  // keep the 5 closest, then sort A–Z so the first reading isn't always listed first
+  opts = [...new Set(opts)].slice(0,5).sort();
+  return opts.length ? opts : null;
+}
+
+const CHECK_RULES =
+`For each line, decide which of the given catalogue codes is actually handwritten there.
+Compare every character: each digit, each letter (watch B/8, O/0, I/1, S/5, Z/2, G/6), and the ending after the hyphen.
+If none of the options matches what is written, answer "none".
+Never answer with a code that is not in that line's options.`;
+const CHECK_FORMAT =
+`Return ONLY valid JSON, no prose, no markdown fences:
+{"answers":[{"id":<number>,"code":"<one of the options exactly, or none>"}]}`;
+const itemLine = it => `${it.id}. First read as "${it.read}", qty ${it.qty}. Options: ${it.options.join(", ")}`;
+
+// Second check from cropped strips: one small image per doubtful line, all in one message.
+function checkMessagesStrips(items){
+  const content = [{type:"text", text:
+`These are cropped strips from a handwritten sale order. Each strip shows one order line (it may also show bits of the lines next to it — use the quantity to pick the right one).
+${CHECK_RULES}`}];
+  for(const it of items){
+    content.push({type:"text", text:"Line "+itemLine(it)});
+    content.push({type:"image_url", image_url:{url:it.crop}});
+  }
+  content.push({type:"text", text:CHECK_FORMAT});
+  return [{role:"user", content}];
+}
+// Fallback when some line has no usable position: send the full page instead.
+function checkMessagesPage(image, items){
+  return [{role:"user", content:[
+    {type:"image_url", image_url:{url:image.dataUrl}},
+    {type:"text", text:
+`This is a photo of a handwritten sale order. Look only at the lines listed below; use the quantity to find each one.
+${CHECK_RULES}
+
+${items.map(itemLine).join("\n")}
+
+${CHECK_FORMAT}`}
+  ]}];
+}
+
+/* ---------- cropping a line out of the page ---------- */
+function loadImage(src){
+  return new Promise((res,rej)=>{ const i=new Image(); i.onload=()=>res(i); i.onerror=()=>rej(new Error("Can't load page image")); i.src=src; });
+}
+// Gemini's box: [ymin, xmin, ymax, xmax] on a 0–1000 scale. Null if it's unusable.
+function validBox(b){
+  if(!Array.isArray(b) || b.length!==4) return null;
+  const v=b.map(Number);
+  if(v.some(x=>!Number.isFinite(x) || x<0 || x>1000)) return null;
+  const [t,l,bt,r]=v;
+  if(bt<=t || r<=l) return null;
+  if(bt-t > 400) return null;                    // a "line" covering 40% of the page isn't a line
+  return v;
+}
+const STRIP_MAX_W = 600;   // strips are shrunk to this width at most (fewer tokens; handwriting stays readable)
+function cropLine(img, box){
+  const [t,l,b,r] = box.map(v=>v/1000);
+  const W=img.naturalWidth, H=img.naturalHeight;
+  const padY = Math.max((b-t)*0.8, 0.02);        // generous margin so nothing gets cut off
+  const padX = 0.08;
+  const sx=Math.max(0,(l-padX)*W), sy=Math.max(0,(t-padY)*H);
+  const sw=Math.min(W,(r+padX)*W)-sx, sh=Math.min(H,(b+padY)*H)-sy;
+  const scale=Math.min(1, STRIP_MAX_W/sw);
+  const c=document.createElement("canvas");
+  c.width=Math.max(1,Math.round(sw*scale)); c.height=Math.max(1,Math.round(sh*scale));
+  const ctx=c.getContext("2d"); ctx.fillStyle="#fff"; ctx.fillRect(0,0,c.width,c.height);
+  ctx.drawImage(img, sx,sy,sw,sh, 0,0,c.width,c.height);
+  return c.toDataURL("image/jpeg", 0.85);
+}
+
+function applyAnswers(part, items, answers){
+  const byId = new Map((answers||[]).map(a=>[Number(a.id), String(a.code??"").trim()]));
+  for(const it of items){
+    const row = part[it.idx];
+    const ans = byId.get(it.id);
+    if(!ans) continue;                                   // no answer: keep the first result
+    const before = row.status;
+    if(/^none$/i.test(ans)){
+      row.status="unknown"; row._flag=true;
+      row.note=`Second check: no catalogue code matches "${it.read}"`;
+      continue;
+    }
+    const pick = it.options.find(o=>o.toUpperCase()===ans.toUpperCase());
+    if(!pick) continue;                                  // answered outside the list: ignore
+    if(pick===row.product){
+      row.status="verified"; row._flag=false;
+      row.note = before==="corrected" ? `Read as "${it.read}", confirmed as ${pick} on second check` : "Confirmed on second check";
+    }else{
+      row.note=`First read "${it.read}", second check says ${pick}`;
+      row.product=pick; row.status="changed"; row._flag=true;
+    }
+  }
+}
+
+// first read (READ_MODEL): the full photo
+function firstMessages(image){
+  return [
+    {role:"system", content:EXTRACT_PROMPT},
+    {role:"user", content:[
+      {type:"image_url", image_url:{url:image.dataUrl, detail:"high"}},
+      {type:"text", text:"Read every code and quantity from this order photo, with each entry's box."}
+    ]}
+  ];
+}
 
 $("#run").addEventListener("click", readPhotos);
 async function readPhotos(){
   const key = keyInput.value.trim();
-  setBusy(true, key ? "Reading with OpenAI…" : "Building mock rows…");
+  const spend = { usd:0, requests:0, cached:0, secondFailed:false };
+  setBusy(true, key ? "Reading…" : "Building mock rows…");
   try{
-    let got = [];
+    let all = [];
     if(!key){
-      got = await mockExtract();
+      all = (await mockExtract()).map(buildRow);
     } else if(!key.startsWith("sk-or-")){
       throw new Error("That key doesn't look like an OpenRouter key (should start with sk-or-).");
     } else {
       for(let i=0;i<images.length;i++){
-        setBusy(true, `Reading photo ${i+1} of ${images.length}…`);
-        const part = await callOpenRouter(key, images[i]);
-        got = got.concat(part);
+        const of = images.length>1 ? ` ${i+1} of ${images.length}` : "";
+        setBusy(true, `Reading page${of}…`);
+        const first = await orChat(key, firstMessages(images[i]), spend, READ_MODEL);
+        const part = parseRows(first).map(buildRow);
+
+        // cut out each line that has a position — used for the second check and the table preview
+        let pageImg = null;
+        try{ pageImg = await loadImage(images[i].dataUrl); }catch(_){}
+        if(pageImg) part.forEach(row=>{ if(row._pos) row._crop = cropLine(pageImg, row._pos); });
+
+        if(doubleBox.checked && CODES.length && part.length){
+          const items=[];
+          part.forEach((row,idx)=>{ const options=shortlistFor(row); if(options) items.push({id:items.length+1, idx, read:row._raw, qty:orderedText(row), options, crop:row._crop}); });
+          if(items.length){
+            // strips if every doubtful line has one; otherwise the full page
+            const useStrips = items.every(it=>it.crop);
+            spend.mode = spend.mode && spend.mode!==(useStrips?"strips":"page") ? "mixed" : (useStrips?"strips":"page");
+            setBusy(true, `Double-checking ${items.length} line${items.length===1?"":"s"}${of?` on page${of}`:""}…`);
+            try{
+              const msgs = useStrips ? checkMessagesStrips(items) : checkMessagesPage(images[i], items);
+              const second = await orChat(key, msgs, spend, CHECK_MODEL);
+              applyAnswers(part, items, parseJSON(second).answers);
+              part.forEach(applyBox);          // a changed code may have a different box size
+            }catch(e){ console.warn("Second check failed; keeping first read.", e); spend.secondFailed=true; }
+          }
+        }
+        all = all.concat(part);
       }
     }
-    if(!got.length){ toast("No rows found in those photos.","err"); setBusy(false); return; }
-    rows = got.map(r=>({product:String(r.product??"").trim(), qty:r.qty??"", _flag:r.confidence==="low"}));
+    if(!all.length){ toast("No rows found in those photos.","err"); return; }
+    rows = all;
     renderTable();
-    toast(`${rows.length} rows ready. Please check the highlighted ones.`);
+    const n = k => rows.filter(r=>r.status===k).length;
+    const bits = [];
+    if(n("verified")) bits.push(`${n("verified")} confirmed`);
+    if(n("changed"))  bits.push(`${n("changed")} changed on second check`);
+    if(n("corrected"))bits.push(`${n("corrected")} auto-corrected`);
+    if(n("unknown"))  bits.push(`${n("unknown")} not in catalogue`);
+    const nBoxes = rows.filter(r=>r.box).length, nNoSize = rows.filter(r=>boxIssue(r)==="bad").length;
+    if(nBoxes) bits.push(`${nBoxes} ordered in boxes${nNoSize?` (${nNoSize} need pieces typed in)`:""}`);
+    toast(`${rows.length} rows ready.${bits.length?" "+bits.join(", ")+".":""}${spend.secondFailed?" Second check failed on some pages.":""}`);
+    if(key){
+      const rs = usd => `₹${(usd*84).toFixed(2)}`;
+      const per = Object.entries(spend.byModel||{}).map(([m,v])=>`${m}: ${v.requests}× ${v.usd?rs(v.usd):"?"}`).join(" · ");
+      const total = spend.usd ? `total ${rs(spend.usd)} ($${spend.usd.toFixed(4)})` : "cost not reported";
+      const how = spend.mode==="strips" ? " · checked from line strips" : spend.mode==="page" ? " · checked from full page" : spend.mode==="mixed" ? " · checked from strips/full page" : "";
+      $("#status").textContent = `${per} · ${total}${how}`;
+    }
   }catch(err){
     console.error(err);
     toast(err.message||"Something went wrong reading the photos.","err");
@@ -488,7 +1013,8 @@ function setBusy(on,msg){
   $("#status").textContent = on ? "" : ($("#status").textContent);
 }
 
-async function callOpenRouter(key, image){
+// one OpenRouter call; returns the reply text and adds cost/cache info to `spend`
+async function orChat(key, messages, spend, model){
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions",{
     method:"POST",
     headers:{
@@ -497,17 +1023,7 @@ async function callOpenRouter(key, image){
       "HTTP-Referer":"https://jal-order-to-csv",
       "X-Title":"JAL Sale Order to CSV"
     },
-    body: JSON.stringify({
-      model:"openai/gpt-4o",
-      temperature:0,
-      messages:[
-        {role:"system",content:EXTRACT_PROMPT},
-        {role:"user",content:[
-          {type:"text",text:"Read every code and quantity from this order photo."},
-          {type:"image_url",image_url:{url:image.dataUrl, detail:"high"}}
-        ]}
-      ]
-    })
+    body: JSON.stringify({ model, temperature:0, messages, usage:{include:true} })
   });
   if(!res.ok){
     let m = `OpenRouter error ${res.status}`;
@@ -516,15 +1032,26 @@ async function callOpenRouter(key, image){
     throw new Error(m);
   }
   const data = await res.json();
-  const text = data.choices?.[0]?.message?.content || "";
-  return parseRows(text);
+  if(spend){
+    spend.requests++;
+    const u = data.usage || {};
+    if(typeof u.cost==="number") spend.usd += u.cost;
+    spend.cached += (u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens) || 0;
+    const short = model.split("/").pop();
+    const m = (spend.byModel ||= {})[short] ||= { requests:0, usd:0 };
+    m.requests++; if(typeof u.cost==="number") m.usd += u.cost;
+  }
+  return data.choices?.[0]?.message?.content || "";
 }
-function parseRows(text){
-  let t = text.trim().replace(/^```json/i,"").replace(/^```/,"").replace(/```$/,"").trim();
+function parseJSON(text){
+  let t = String(text||"").trim().replace(/^```json/i,"").replace(/^```/,"").replace(/```$/,"").trim();
   const s=t.indexOf("{"), e=t.lastIndexOf("}");
   if(s>=0 && e>=0) t=t.slice(s,e+1);
-  try{ const j=JSON.parse(t); return Array.isArray(j.rows)?j.rows:[]; }
-  catch(_){ return []; }
+  try{ return JSON.parse(t) || {}; }catch(_){ return {}; }
+}
+function parseRows(text){
+  const j = parseJSON(text);
+  return Array.isArray(j.rows) ? j.rows : [];
 }
 
 /* mock extraction: pretend to read, using codes drawn from the real photos */
@@ -544,51 +1071,118 @@ async function mockExtract(){
 }
 
 $("#sample").addEventListener("click", async ()=>{
-  rows = (await mockExtract()).map(r=>({product:r.product,qty:r.qty,_flag:r.confidence==="low"}));
-  renderTable(); toast("Loaded sample rows so you can see the flow.");
+  // Deliberately messy readings, so the demo shows every result the app can give.
+  const demo = [
+    {product:"PT 12360-26", qty:1, unit:"box", confidence:"high"},       // spaced code -> matched + confirmed; box size from sheet
+    {product:"PT12362-31", qty:0.5, unit:"box", confidence:"high"},      // look-alike -> changed; box size estimated from type
+    {product:"PT-12274-26", qty:2, unit:"box", confidence:"high"},       // box size from sheet
+    {product:"SINGLE LIVER BASIN MIXER (EL11220-CH)", qty:4, unit:"pcs", confidence:"high"}, // description stripped
+    {product:"J-3O1", qty:2, unit:"pcs", confidence:"low"},              // O read for 0 -> auto-corrected
+    {product:"81390", qty:3, unit:"box", confidence:"high"},             // box size unknown -> type pieces in
+    {product:"ZZZ-999", qty:1, unit:"pcs", confidence:"low"}             // not in catalogue
+  ];
+  rows = demo.map(buildRow);
+  // simulate the second check's answers for the first two rows (it runs for real with a key)
+  if(CODES.length){
+    applyAnswers(rows, [
+      {id:1, idx:0, read:"PT 12360-26", qty:"1 box", options:["PT12360-26","PT12361-26","PT12362-26"]},
+      {id:2, idx:1, read:"PT12362-31", qty:"0.5 box", options:["PT12360-31","PT12362-31","PT12363-31"]}
+    ], [{id:1, code:"PT12360-26"}, {id:2, code:"PT12363-31"}]);
+    rows.forEach(applyBox);
+  }
+  renderTable(); toast("Sample rows loaded — they show every check result. With a key, the second check runs for real.");
 });
 
 /* ============================================================
    TABLE  (editable)
    ============================================================ */
+// a code with any letter in it (PT12360-26, J-301, EL11220-CH) — JAL's system can mishandle these
+const isAlnum = code => /[A-Za-z]/.test(String(code||""));
+
+function statusBadge(status){
+  const map = {
+    exact:    ["✓ matched",   "ok"],
+    verified: ["✓✓ confirmed","ok"],
+    corrected:["✎ corrected", "warn"],
+    changed:  ["↺ changed",   "warn"],
+    unknown:  ["! not found", "bad"]
+  };
+  const [txt,cls] = map[status] || ["",""];
+  return txt ? `<span class="badge ${cls}">${txt}</span>` : "";
+}
+// row colour: problems first, then alphanumeric
+function rowClass(r){
+  const bi = boxIssue(r);
+  if(r.status==="unknown" || bi==="bad") return "flag";
+  if(r.status==="corrected" || r.status==="changed" || bi==="warn") return "warnrow";
+  if(isAlnum(r.product)) return "alnumrow";
+  return "";
+}
 function renderTable(){
   $("#tablewrap").style.display = rows.length ? "block" : "none";
   const head=$("#headRow"); head.innerHTML="";
-  // show CODE + QTY as the editable columns (the rest come from defaults)
-  ["pucode / code","qty",""].forEach((h,i)=>{
-    const th=document.createElement("th"); th.textContent=h; if(i===2) th.style.width="34px"; head.append(th);
+  ["pucode / code","qty (pieces)","status",""].forEach((h,i)=>{
+    const th=document.createElement("th"); th.textContent=h; if(i===3) th.style.width="34px"; head.append(th);
   });
   const body=$("#body"); body.innerHTML="";
   rows.forEach((r,idx)=>{
-    const tr=document.createElement("tr"); if(r._flag) tr.className="flag";
+    const tr=document.createElement("tr");
+    tr.className = rowClass(r);
     const c1=document.createElement("td");
     const i1=document.createElement("input"); i1.value=r.product; i1.placeholder="item code";
-    i1.oninput=()=>{ r.product=i1.value; r._flag=false; tr.classList.remove("flag"); updateFlagNote(); };
+    i1.oninput=()=>{ r.product=i1.value; };
+    // re-check the code once the person finishes typing (Enter or leaving the cell),
+    // so the table isn't redrawn under them on every keystroke
+    i1.onchange=()=>{
+      if(CODES.length){ const res=resolveCode(i1.value); r.product=res.product; r.status=res.status; r.note=res.note; r._flag=res._flag; }
+      applyBox(r);
+      renderTable();
+    };
     c1.append(i1);
+    if(r._crop){   // the handwriting for this line, cut from the photo
+      const im=document.createElement("img"); im.className="linecrop"; im.src=r._crop; im.alt="Handwriting for this line";
+      im.title="Click to enlarge"; im.onclick=()=>im.classList.toggle("big");
+      c1.append(im);
+    }
     const c2=document.createElement("td"); c2.className="qty";
-    const i2=document.createElement("input"); i2.value=r.qty; i2.inputMode="numeric"; i2.placeholder="qty";
-    i2.oninput=()=>{ r.qty=i2.value; };
-    c2.append(i2);
-    const c3=document.createElement("td"); c3.className="del";
+    const i2=document.createElement("input"); i2.value=r.qty; i2.inputMode="decimal"; i2.placeholder = r.box ? "pcs?" : "qty";
+    const bn=document.createElement("span"); bn.className="boxnote";
+    const paintQty=()=>{ bn.textContent = boxNote(r); bn.className = "boxnote " + boxIssue(r); tr.className = rowClass(r); updateFlagNote(); };
+    i2.oninput=()=>{ r.qty=i2.value; if(r.box) r.box.manual = i2.value.trim()!==""; paintQty(); };
+    c2.append(i2, bn);
+    const c3=document.createElement("td"); c3.className="status";
+    c3.innerHTML = statusBadge(r.status)
+      + (isAlnum(r.product) ? ` <span class="badge alnum">alphanumeric</span>` : "")
+      + (r.box ? ` <span class="badge box">box</span>` : "")
+      + (r.note ? `<span class="statusnote">${escapeHtml(r.note)}</span>` : "");
+    const c4=document.createElement("td"); c4.className="del";
     const del=document.createElement("button"); del.textContent="🗑"; del.title="Delete row";
     del.onclick=()=>{ rows.splice(idx,1); renderTable(); };
-    c3.append(del);
-    tr.append(c1,c2,c3); body.append(tr);
+    c4.append(del);
+    tr.append(c1,c2,c3,c4); body.append(tr);
+    paintQty();
   });
   $("#rowCount").textContent = `${rows.length} row${rows.length===1?"":"s"}`;
   updateFlagNote();
 }
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function updateFlagNote(){
-  const n = rows.filter(r=>r._flag).length;
-  $("#flagNote").innerHTML = n ? `<span class="fl">● ${n} low-confidence</span> — highlighted rows may be misread` : "";
+  const check = rows.filter(r=>["unknown","corrected","changed"].includes(r.status) || boxIssue(r) || (r._flag && !r.status)).length;
+  const alnum = rows.filter(r=>isAlnum(r.product)).length;
+  const bits = [];
+  if(check) bits.push(`<span class="fl">● ${check} to check</span>`);
+  if(alnum) bits.push(`<span class="al">● ${alnum} alphanumeric</span>`);
+  $("#flagNote").innerHTML = bits.join(" &nbsp;");
 }
-$("#addRow").addEventListener("click", ()=>{ rows.push({product:"",qty:"",_flag:false}); renderTable(); });
+$("#addRow").addEventListener("click", ()=>{ rows.push({product:"",ordered:"",unit:"pcs",qty:"",box:null,status:"",note:"",_flag:false}); renderTable(); });
 
 /* ============================================================
    CSV EXPORT  (exact column order)
    ============================================================ */
 $("#download").addEventListener("click", ()=>{
   if(!rows.length){ toast("No rows to export.","err"); return; }
+  const noQty = rows.filter(r=>boxIssue(r)==="bad").length;
+  if(noQty && !confirm(`${noQty} row${noQty===1?" was":"s were"} ordered in boxes, but the box size isn't known, so the quantity is empty.\n\nType the pieces in the table first, or press OK to download anyway.`)) return;
   const esc = v => { v=(v==null?"":String(v)); return /[",\n\r]/.test(v)? '"'+v.replace(/"/g,'""')+'"' : v; };
   const lines = [ COLUMNS.join(",") ];
   rows.forEach(r=>{
@@ -602,6 +1196,87 @@ $("#download").addEventListener("click", ()=>{
   a.href=url; a.download=`JAL_sale_order_${stamp}.csv`; a.click();
   URL.revokeObjectURL(url);
   toast("CSV downloaded.");
+});
+
+/* ============================================================
+   FLAGGED EXCEL EXPORT  (highlights problem rows)
+   ============================================================ */
+$("#downloadXlsx").addEventListener("click", async ()=>{
+  if(!rows.length){ toast("No rows to export.","err"); return; }
+  if(typeof ExcelJS==="undefined"){ toast("Excel library didn't load — check your connection.","err"); return; }
+  toast("Building Excel…");
+
+  const HDR="1E2761", AMBER="FFF8E6", RED="FCE4D6", BLUE="E3ECFA";
+  const fill = c => ({ type:"pattern", pattern:"solid", fgColor:{argb:"FF"+c} });
+  const thin = { style:"thin", color:{argb:"FFD9D9D9"} };
+  const border = { top:thin, left:thin, right:thin, bottom:thin };
+
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Sale Order", { views:[{state:"frozen", ySplit:1}] });
+  const outCols = COLUMNS.concat(["ordered_as","pcs_per_box","box_size_from","check_status","alphanumeric","note"]);
+  const widths = {product:28, ordered_as:14, pcs_per_box:12, box_size_from:40, check_status:16, alphanumeric:14, note:44};
+  ws.columns = outCols.map(c=>({ header:c, key:c, width: widths[c] || 12 }));
+
+  // header style
+  ws.getRow(1).eachCell(cell=>{
+    cell.font={ name:"Arial", bold:true, size:10, color:{argb:"FFFFFFFF"} };
+    cell.fill=fill(HDR); cell.border=border; cell.alignment={horizontal:"center",vertical:"middle"};
+  });
+
+  const label = { exact:"Matched", verified:"Confirmed", corrected:"Corrected", changed:"Changed", unknown:"Not found" };
+  const boxFrom = r => { const b=r.box; if(!b) return "";
+    if(b.manual) return "pieces entered by hand";
+    if(b.source==="unknown") return "NOT KNOWN — type pieces in qty";
+    if(b.source==="sheet") return "box sheet";
+    if(b.source==="colour") return `same as ${b.ref} (other colour)`;
+    return `ESTIMATE from type: ${b.ref}`; };
+  let nCorr=0, nUnk=0, nAlnum=0, nBoxWarn=0, nBoxBad=0;
+  rows.forEach(r=>{
+    const st = r.status || (lookup(r.product)?"exact":"unknown");
+    const alnum = isAlnum(r.product);
+    const bi = boxIssue(r);
+    const rec = {...DEFAULTS, product:r.product, qty:r.qty,
+      ordered_as: r.box ? orderedText(r) : "", pcs_per_box: r.box && r.box.per ? r.box.per : "", box_size_from: boxFrom(r),
+      check_status:label[st]||"", alphanumeric: alnum?"Yes":"", note:r.note||""};
+    const row = ws.addRow(rec);
+    // problems first, then alphanumeric
+    const rowFill = (st==="unknown"||bi==="bad") ? RED : (st==="corrected"||st==="changed"||bi==="warn") ? AMBER : alnum ? BLUE : null;
+    if(st==="corrected"||st==="changed") nCorr++; if(st==="unknown") nUnk++; if(alnum) nAlnum++;
+    if(bi==="warn") nBoxWarn++; if(bi==="bad") nBoxBad++;
+    row.eachCell({includeEmpty:true}, cell=>{
+      cell.font={ name:"Arial", size:10 };
+      cell.border=border;
+      if(rowFill) cell.fill=fill(rowFill);
+    });
+    if(alnum){ row.getCell("product").font={ name:"Arial", size:10, bold:true, color:{argb:"FF2B4F8C"} };
+               row.getCell("alphanumeric").font={ name:"Arial", size:10, bold:true, color:{argb:"FF2B4F8C"} }; }
+    if(st!=="exact" && st!=="verified"){ const ic=row.getCell("note"); ic.font={ name:"Arial", size:10, color:{argb:"FF9C3B00"} }; }
+  });
+
+  // legend sheet
+  const lg = wb.addWorksheet("How to read this");
+  lg.getColumn(1).width=3; lg.getColumn(2).width=95;
+  const put=(rw,txt,opts={})=>{ const c=lg.getCell(`B${rw}`); c.value=txt;
+    c.font={ name:"Arial", size:opts.size||11, bold:!!opts.bold, color:{argb:opts.color||"FF000000"} };
+    c.alignment={wrapText:true,vertical:"middle"}; if(opts.fillc) c.fill=fill(opts.fillc); return c; };
+  put(1,"How to read this file",{bold:true,size:14,color:"FF1E2761"});
+  put(3,"Each code was checked against JAL's official product list. Rows are colour-coded:");
+  put(5,"White   =  Matched or Confirmed — the code is in the catalogue (Confirmed = also passed the second check). No action needed.",{bold:true});
+  put(7,`Blue    =  Alphanumeric code (has letters, e.g. PT12360-26, J-301, EL11220-CH). The code passed the checks, but JAL's system can mishandle codes with letters, so confirm it imports correctly.  (${nAlnum} rows in total)`,{bold:true,fillc:BLUE});
+  put(9,`Amber   =  Corrected or Changed — the reading was fixed to a real catalogue code (e.g. a B read as 8), or the second check picked a different code. The 'note' column shows the original reading. Also amber: box orders whose pieces-per-box is an ESTIMATE from the product type. Please confirm.  (${nCorr} code rows, ${nBoxWarn} box rows)`,{bold:true,fillc:AMBER});
+  put(11,`Red     =  Not found — this code isn't in the catalogue, or it was ordered in boxes and the box size isn't known, so qty is empty. Fix before importing.  (${nUnk} code rows, ${nBoxBad} box rows)`,{bold:true,fillc:RED});
+  put(13,"Red and amber take priority over blue, so a problem row stays red or amber even if it is alphanumeric. Every alphanumeric row is marked 'Yes' in the 'alphanumeric' column and its code is in bold blue.");
+  put(15,"Boxes: 'qty' is always in PIECES. A 'box' means the small box unless the order says master box / carton. 'ordered_as' shows what was written (e.g. 0.5 box), 'pcs_per_box' the size used, and 'box_size_from' where it came from: the box sheet, the same tap in another colour, or an estimate from the product-type rows.");
+  [5,7,9,11,15].forEach(r=>lg.getRow(r).height=44);
+
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], {type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+  const url = URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  const stamp = (DEFAULTS.dated||today()).replace(/[^0-9A-Za-z]/g,"");
+  a.href=url; a.download=`JAL_sale_order_flagged_${stamp}.xlsx`; a.click();
+  URL.revokeObjectURL(url);
+  toast(`Excel exported — ${nCorr} corrected/changed, ${nUnk} not found, ${nAlnum} alphanumeric.`);
 });
 
 /* ============================================================

@@ -14,15 +14,19 @@ The key stays only in your browser. It is never uploaded or shared.
 
 ## Reading an order
 
-1. **Take a clear photo** of the handwritten order. Good light, flat page, whole sheet in frame. If your phone saves photos as **HEIC**, export/share them as **JPG** first.
-2. **Add the photo(s)** — drag onto the box, or click to choose. You can add several at once.
-3. Click **Read photos**. Wait a few seconds per photo.
-4. The rows appear in the table. **Pink rows** are ones the AI wasn't sure about — check those first.
+1. **Take a clear photo** of the handwritten order. Good light, flat page, whole sheet in frame. Any photo format works, including iPhone HEIC, and you can also add a **PDF** (each page is read separately).
+2. **Add the files** — drag onto the box, or click to choose. You can add several at once.
+3. Click **Read photos**. Wait a few seconds per page. Doubtful lines get a second look automatically, which adds a few seconds.
+4. The rows appear in the table, each with a status:
+   - **✓ matched** / **✓✓ confirmed** (white or blue row) — the code is in the product list. Confirmed means it also passed the second check.
+   - **✎ corrected** / **↺ changed** (amber row) — the code was fixed to a real one, or the second check picked a different code. The note under it shows what was first read. Check these against the photo.
+   - **! not found** (red row) — not in the product list. Check it by hand.
+   - **alphanumeric** (blue badge and blue row) — the code has letters in it, which JAL's system can mishandle. Make sure it imports correctly.
+   - **box** (badge) — the order was in boxes. The qty column shows **pieces**, with the working underneath (e.g. "½ box × 24 pcs"). A plain "box" means the small box. If it says **estimated**, the box size was guessed from the product type, so confirm it. If it says **box size not known**, type the pieces yourself.
 
 ## Checking and fixing
 
-- Every code and quantity is editable — just click a cell and type.
-- Fixing a pink row clears the highlight.
+- Every code and quantity is editable — just click a cell and type. The app re-checks the code against the product list as you type.
 - **+ Add empty row** adds a line the AI missed.
 - The 🗑 button deletes a row.
 
